@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flask-user-auth"
+version = "1.0.0"
+description = "Dual token & session authentication, User/UserAuth separation, Click CLI, and CRUD for Flask."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "BuyAutoParts" }]
+dependencies = [
+    "flask>=2.0",
+    "flask-sqlalchemy>=3.0",
+    "sqlalchemy>=2.0",
+    "werkzeug>=2.0",
+    "pyjwt>=2.8.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+session = ["flask-login>=0.6.0"]
+crud = ["flask-api-builder", "marshmallow", "marshmallow-sqlalchemy"]
+dev = ["pytest", "flask-login>=0.6.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flask_user_auth*"]
