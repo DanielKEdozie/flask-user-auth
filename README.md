@@ -1,6 +1,6 @@
 # flask-user-auth
 
-Dual token (JWT) & session (cookie) authentication, User/UserAuth separation, built-in Click CLI, and automatic CRUD for Flask + SQLAlchemy.
+Dual token (JWT) & session (cookie) authentication, User/UserAuth separation, built-in Click CLI, granular route decorators, and automatic CRUD for Flask + SQLAlchemy.
 
 ---
 
@@ -12,15 +12,22 @@ Dual token (JWT) & session (cookie) authentication, User/UserAuth separation, bu
    - Profile queries (`GET /users`, `GET /auth/me`) **cannot leak password hashes**.
 2. **Instant Token Invalidation via `last_reset_date`**:
    - Changing or resetting a password updates `last_reset_date`.
-   - Older JWT tokens issued prior to that timestamp are **immediately rejected across all devices**.
+   - Older JWT tokens issued prior to that timestamp are **immediately revoked across all devices**.
 3. **Dual Authentication**:
    - **Token Flow (SPAs & Mobile)**: `/auth/token`, `/auth/refresh`, `/auth/me`, `/auth/change-password`.
    - **Session Flow (Web & Admin)**: `/auth/session/login`, `/auth/session/logout`, `/auth/session/me` via Flask-Login.
-4. **Secure Refresh Strategy (`refresh_type`)**:
+4. **Granular Route Protection Decorators**:
+   - `@login_required`: Dual auth by default (or configured default).
+   - `@login_required(auth_type="session")` / `@session_required`: Strict session cookie only.
+   - `@login_required(auth_type="token")` / `@token_required`: Strict `Authorization: Bearer <token>` only.
+   - `@roles_required(*roles, auth_type="...")` and `@admin_required(auth_type="...")`.
+5. **Standardized `config.py` Settings (`FUA_*`)**:
+   - Configure everything cleanly in your Flask application config (`FUA_JWT_ACCESS_TOKEN_EXPIRES`, `FUA_COOKIE_SAMESITE`, etc.).
+6. **Secure Refresh Strategy (`refresh_type`)**:
    - Supports both HTTP-only secure cookies (`'http'`) to mitigate XSS and JSON payload tokens (`'token'`).
-5. **Built-in Click CLI (`flask user ...`)**:
+7. **Built-in Click CLI (`flask user ...`)**:
    - Command-line operations: `list`, `create`, `create-admin`, `set-password`, `activate`, `deactivate`, `delete`.
-6. **Automatic Admin CRUD**:
+8. **Automatic Admin CRUD**:
    - Seamlessly integrates with `flask-api-builder` for `/users` REST endpoints.
 
 ---
@@ -36,7 +43,42 @@ pip install git+https://github.com/DanielKEdozie/flask-user-auth.git
 Or in `requirements.txt`:
 
 ```text
-flask-user-auth @ git+https://github.com/DanielKEdozie/flask-user-auth.git@v1.0.0
+flask-user-auth @ git+https://github.com/DanielKEdozie/flask-user-auth.git@v1.1.0
+```
+
+---
+
+## Configuration (`config.py` / `app.config`)
+
+Configure your settings directly via standard `FUA_*` keys in `config.py`:
+
+```python
+# config.py
+from datetime import timedelta
+
+
+class Config:
+  SECRET_KEY = 'your-secret-key'
+
+  # JWT & Tokens:
+  FUA_JWT_SECRET_KEY = 'your-jwt-secret-key'  # Falls back to SECRET_KEY
+  FUA_JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)  # Or seconds (3600)
+  FUA_JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)  # Or seconds (86400 * 30)
+
+  # Cookie Settings for refresh token:
+  FUA_COOKIE_NAME = 'refresh_token'
+  FUA_COOKIE_SAMESITE = 'Lax'  # 'Lax', 'Strict', or 'None'
+  FUA_COOKIE_SECURE = True  # True in production (HTTPS)
+  FUA_COOKIE_HTTPONLY = True  # Prevent JS access (XSS defense)
+  FUA_COOKIE_PATH = '/'
+
+  # Routing & Behaviors:
+  FUA_AUTH_PREFIX = '/auth'
+  FUA_USER_PREFIX = '/users'
+  FUA_FLASK_LOGIN = True
+  FUA_REFRESH_TYPE = ['http', 'token']
+  FUA_DEFAULT_AUTH_TYPE = 'both'  # 'both', 'session', or 'token'
+  FUA_CLI_GROUP = 'user'
 ```
 
 ---
@@ -51,13 +93,11 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_user_auth import FlaskUserAuth, UserAuthMixin, UserMixin
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "super-secret-key"
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///app.db"
+app.config.from_object("config.Config")
 
 db = SQLAlchemy(app)
 
 
-# User profile model:
 class User(db.Model, UserMixin):
   __tablename__ = "users"
 
@@ -65,13 +105,13 @@ class User(db.Model, UserMixin):
   name = db.Column(db.String(255), nullable=False)
   role = db.Column(db.String(50), default="user")
 
+  # Add relations to future models:
+  orders = db.relationship("Order", backref="user", lazy="select")
 
-# Authentication credentials model:
+
 class UserAuth(db.Model, UserAuthMixin):
   __tablename__ = "user_auth"
-  # UserAuthMixin supplies:
-  # user_id (PK & FK -> users.id, cascade delete)
-  # password_hash, last_reset_date, failed_attempts, last_login_date
+  # UserAuthMixin supplies: user_id (PK & FK), password_hash, last_reset_date, etc.
 ```
 
 ### 2. Initialize the Extension
@@ -83,11 +123,6 @@ user_auth.init_app(
     db=db,
     user_model=User,
     auth_model=UserAuth,
-    auth_prefix="/auth",  # /auth/token, /auth/refresh, /auth/me
-    user_prefix="/users",  # Admin CRUD endpoints via flask-api-builder
-    flask_login=True,  # Enables session auth /auth/session/*
-    refresh_type=["http", "token"],  # Dual refresh mechanism
-    cli_group="user",  # Registers `flask user <cmd>` CLI
 )
 
 with app.app_context():
@@ -96,78 +131,80 @@ with app.app_context():
 
 ---
 
-## CLI Commands (`flask user ...`)
+## Granular Route Protection Decorators
 
-`flask-user-auth` automatically binds full CLI management to your Flask app:
-
-```bash
-# List all registered users in a clean ASCII table
-flask user list [--limit 50] [--role admin] [--active]
-
-# Create a standard user (prompts for password securely if omitted)
-flask user create --email user@example.com --name "John Doe"
-
-# Create an administrator
-flask user create-admin --email admin@example.com --name "Super Admin"
-
-# Reset a user's password (auto-revokes all their active tokens)
-flask user set-password --email user@example.com
-
-# Activate or deactivate accounts
-flask user deactivate --email user@example.com
-flask user activate --email user@example.com
-
-# Delete user and cascaded credentials
-flask user delete --email user@example.com [--yes]
-```
-
----
-
-## Route Protection Decorators
-
-Protect routes with dual support (accepts either active session cookie OR `Authorization: Bearer <token>`):
+Choose the exact authentication mode for every route:
 
 ```python
-from flask_user_auth import admin_required, current_user, login_required, roles_required
+from flask_user_auth import (
+    admin_required,
+    current_user,
+    login_required,
+    roles_required,
+    session_required,
+    token_required,
+)
 
 
-# Accepts either JWT or Flask-Login session:
-@app.route('/api/profile')
+# 1. Dual Auth (Accepts either active session cookie OR Bearer token):
+@app.route('/api/general')
 @login_required
-def get_profile():
-  return {'email': current_user.email, 'name': current_user.name}
+def general():
+  return {'email': current_user.email}
 
 
-# Role-based protection:
-@app.route('/api/manager-dashboard')
-@roles_required('manager', 'director')
-def manager_dashboard():
-  return {'status': 'authorized'}
+# 2. Strict Session Cookie (For web pages & Jinja admin templates):
+@app.route('/dashboard')
+@session_required  # Equivalent to @login_required(auth_type="session")
+def dashboard():
+  return {'user': current_user.email}
 
 
-# Admin-only:
-@app.route('/api/admin/metrics')
-@admin_required
+# 3. Strict Bearer Token (For mobile & SPA REST APIs):
+@app.route('/api/v1/orders')
+@token_required  # Equivalent to @login_required(auth_type="token")
+def list_orders():
+  return {'user_id': current_user.id}
+
+
+# 4. Role-based protection:
+@app.route('/api/reports')
+@roles_required('manager', 'director', auth_type='token')
+def reports():
+  return {'data': []}
+
+
+# 5. Admin-only:
+@app.route('/admin/metrics')
+@admin_required(auth_type='session')
 def admin_metrics():
   return {'metrics': {...}}
 ```
 
 ---
 
-## REST Endpoints Overview
+## Built-in CLI Commands (`flask user ...`)
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/auth/register` | Register new user + auth credentials (returns tokens) |
-| `POST` | `/auth/token` | Login with email & password (returns tokens + sets HTTP cookie) |
-| `POST` | `/auth/refresh` | Refresh access token using cookie or body |
-| `GET` | `/auth/me` | Current authenticated user profile |
-| `PUT/PATCH` | `/auth/me` | Update current user profile fields |
-| `POST` | `/auth/change-password` | Update password and invalidate older tokens |
-| `POST` | `/auth/session/login` | Session login (Flask-Login cookie) |
-| `POST/GET`| `/auth/session/logout`| Session logout & cookie cleanup |
-| `GET` | `/auth/session/me` | Current session status |
-| `CRUD` | `/users` | Full pagination/filter/search CRUD via `flask-api-builder` |
+```bash
+# List all registered users
+flask user list [--limit 50] [--role admin] [--active]
+
+# Create a standard user (prompts securely for password if omitted)
+flask user create --email user@example.com --name "John Doe"
+
+# Create an administrator
+flask user create-admin --email admin@example.com --name "Super Admin"
+
+# Reset a user's password (auto-revokes all existing JWTs)
+flask user set-password --email user@example.com
+
+# Activate or deactivate accounts
+flask user deactivate --email user@example.com
+flask user activate --email user@example.com
+
+# Delete user (cascades to user_auth)
+flask user delete --email user@example.com [--yes]
+```
 
 ---
 

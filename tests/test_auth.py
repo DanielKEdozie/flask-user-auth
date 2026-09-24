@@ -197,3 +197,76 @@ def test_cli_commands(app):
     # 6. Delete:
     res = runner.invoke(args=["user", "delete", "--email", "cli@example.com", "--yes"])
     assert "deleted" in res.output
+
+def test_auth_type_decorators(app, client):
+    from flask_user_auth import token_required, session_required, login_required
+
+    @app.route("/token-strict")
+    @token_required
+    def token_strict():
+        return {"auth": "token"}
+
+    @app.route("/session-strict")
+    @session_required
+    def session_strict():
+        return {"auth": "session"}
+
+    @app.route("/parameterized-session")
+    @login_required(auth_type="session")
+    def parameterized_session():
+        return {"auth": "session"}
+
+    # 1. Register & get token:
+    res = client.post("/auth/register", json={"email": "dan@example.com", "password": "pass"})
+    token = res.get_json()["access_token"]
+
+    # 2. Token-strict route:
+    # Works with Bearer header:
+    res = client.get("/token-strict", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
+
+    # Fails when trying to access without token (even if session exists):
+    res = client.get("/token-strict")
+    assert res.status_code == 401
+
+    # 3. Session-strict route:
+    # Works because client has session cookie:
+    res = client.get("/session-strict")
+    assert res.status_code == 200
+
+    # Parameterized session route works:
+    res = client.get("/parameterized-session")
+    assert res.status_code == 200
+
+    # Logout to clear session:
+    client.post("/auth/session/logout")
+
+    # Session routes must now fail:
+    res = client.get("/session-strict")
+    assert res.status_code == 401
+    res = client.get("/parameterized-session")
+    assert res.status_code == 401
+
+
+def test_fua_config_settings():
+    from flask import Flask
+    from flask_user_auth import FlaskUserAuth
+    from datetime import timedelta
+
+    app = Flask(__name__)
+    app.config["FUA_JWT_SECRET_KEY"] = "custom-jwt-secret-xyz"
+    app.config["FUA_JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=15)
+    app.config["FUA_COOKIE_SAMESITE"] = "Strict"
+    app.config["FUA_COOKIE_SECURE"] = True
+    app.config["FUA_AUTH_PREFIX"] = "/api/v1/auth"
+    app.config["FUA_CLI_GROUP"] = "accounts"
+
+    ext = FlaskUserAuth()
+    ext.init_app(app, db=db, user_model=User, auth_model=UserAuth)
+
+    assert ext.jwt_secret == "custom-jwt-secret-xyz"
+    assert ext.access_token_expires == 900
+    assert ext.cookie_samesite == "Strict"
+    assert ext.cookie_secure is True
+    assert ext.auth_prefix == "/api/v1/auth"
+    assert ext.cli_group == "accounts"

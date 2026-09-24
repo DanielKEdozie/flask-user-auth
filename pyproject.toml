@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flask-user-auth"
-version = "1.0.0"
+version = "1.1.0"
 description = "Dual token & session authentication, User/UserAuth separation, Click CLI, and CRUD for Flask."
 readme = "README.md"
 requires-python = ">=3.10"

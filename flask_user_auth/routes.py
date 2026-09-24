@@ -65,7 +65,7 @@ def create_auth_blueprint(extension: Any) -> Blueprint:
         }
         res = jsonify(response_data)
         if "http" in extension.refresh_type:
-            set_refresh_cookie(res, refresh_token)
+            set_refresh_cookie(res, refresh_token, cookie_name=extension.cookie_name, max_age=extension.refresh_token_expires, path=extension.cookie_path, secure=extension.cookie_secure, httponly=extension.cookie_httponly, samesite=extension.cookie_samesite)
         return res, 201
 
     @bp.route("/token", methods=["POST"])
@@ -106,12 +106,12 @@ def create_auth_blueprint(extension: Any) -> Blueprint:
             "refresh_token": refresh_token,
         })
         if "http" in extension.refresh_type:
-            set_refresh_cookie(res, refresh_token)
+            set_refresh_cookie(res, refresh_token, cookie_name=extension.cookie_name, max_age=extension.refresh_token_expires, path=extension.cookie_path, secure=extension.cookie_secure, httponly=extension.cookie_httponly, samesite=extension.cookie_samesite)
         return res, 200
 
     @bp.route("/refresh", methods=["POST"])
     def refresh():
-        token = extract_refresh_token(request)
+        token = extract_refresh_token(request, cookie_name=extension.cookie_name)
         if not token:
             return jsonify({"error": "Unauthorized", "message": "Missing refresh token"}), 401
 
@@ -170,7 +170,7 @@ def create_auth_blueprint(extension: Any) -> Blueprint:
 
         # Invalidate existing refresh cookie if any:
         res = jsonify({"message": "Password changed successfully. Prior tokens have been revoked."})
-        clear_refresh_cookie(res)
+        clear_refresh_cookie(res, cookie_name=extension.cookie_name, path=extension.cookie_path)
         return res, 200
 
     # Session-specific endpoints (Flask-Login):
@@ -206,7 +206,7 @@ def create_auth_blueprint(extension: Any) -> Blueprint:
             from flask_login import logout_user
             logout_user()
             res = jsonify({"success": True, "message": "Logged out successfully"})
-            clear_refresh_cookie(res)
+            clear_refresh_cookie(res, cookie_name=extension.cookie_name, path=extension.cookie_path)
             return res, 200
 
         @bp.route("/session/me", methods=["GET"])

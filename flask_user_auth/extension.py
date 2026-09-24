@@ -1,4 +1,5 @@
 """FlaskUserAuth extension class."""
+from datetime import timedelta
 from typing import Any, List, Optional, Type
 from flask import Blueprint, Flask
 from sqlalchemy import select
@@ -18,28 +19,30 @@ class FlaskUserAuth:
         ma: Any = None,
         user_model: Optional[Type] = None,
         auth_model: Optional[Type] = None,
-        auth_prefix: str = "/auth",
-        user_prefix: Optional[str] = "/users",
-        flask_login: bool = True,
+        auth_prefix: Optional[str] = None,
+        user_prefix: Optional[str] = None,
+        flask_login: Optional[bool] = None,
         refresh_type: Optional[List[str]] = None,
         jwt_secret: Optional[str] = None,
-        access_token_expires: int = 3600,
-        refresh_token_expires: int = 86400 * 30,
-        cli_group: str = "user",
+        access_token_expires: Optional[Any] = None,
+        refresh_token_expires: Optional[Any] = None,
+        default_auth_type: Optional[str] = None,
+        cli_group: Optional[str] = None,
     ):
         self.app = app
         self.db = db
         self.ma = ma
         self.user_model = user_model
         self.auth_model = auth_model
-        self.auth_prefix = auth_prefix
-        self.user_prefix = user_prefix
-        self.use_flask_login = flask_login
-        self.refresh_type = refresh_type or ["http", "token"]
-        self.jwt_secret = jwt_secret
-        self.access_token_expires = access_token_expires
-        self.refresh_token_expires = refresh_token_expires
-        self.cli_group = cli_group
+        self._auth_prefix = auth_prefix
+        self._user_prefix = user_prefix
+        self._use_flask_login = flask_login
+        self._refresh_type = refresh_type
+        self._jwt_secret = jwt_secret
+        self._access_token_expires = access_token_expires
+        self._refresh_token_expires = refresh_token_expires
+        self._default_auth_type = default_auth_type
+        self._cli_group = cli_group
 
         if app is not None and db is not None:
             self.init_app(
@@ -51,10 +54,11 @@ class FlaskUserAuth:
                 auth_prefix=auth_prefix,
                 user_prefix=user_prefix,
                 flask_login=flask_login,
-                refresh_type=self.refresh_type,
+                refresh_type=refresh_type,
                 jwt_secret=jwt_secret,
                 access_token_expires=access_token_expires,
                 refresh_token_expires=refresh_token_expires,
+                default_auth_type=default_auth_type,
                 cli_group=cli_group,
             )
 
@@ -107,36 +111,102 @@ class FlaskUserAuth:
         ma: Any = None,
         user_model: Optional[Type] = None,
         auth_model: Optional[Type] = None,
-        auth_prefix: str = "/auth",
-        user_prefix: Optional[str] = "/users",
-        flask_login: bool = True,
+        auth_prefix: Optional[str] = None,
+        user_prefix: Optional[str] = None,
+        flask_login: Optional[bool] = None,
         refresh_type: Optional[List[str]] = None,
         jwt_secret: Optional[str] = None,
-        access_token_expires: int = 3600,
-        refresh_token_expires: int = 86400 * 30,
-        cli_group: str = "user",
+        access_token_expires: Optional[Any] = None,
+        refresh_token_expires: Optional[Any] = None,
+        default_auth_type: Optional[str] = None,
+        cli_group: Optional[str] = None,
     ) -> None:
-        """Initialize extension with Flask app instance."""
+        """Initialize extension reading from app.config (FUA_*) with parameter overrides."""
+        cfg = app.config
         self.app = app
         self.db = db
         self.ma = ma
         self.user_model = user_model or getattr(self, "user_model", None)
         self.auth_model = auth_model or getattr(self, "auth_model", None)
-        self.auth_prefix = auth_prefix
-        self.user_prefix = user_prefix
-        self.use_flask_login = flask_login
-        self.refresh_type = refresh_type or getattr(self, "refresh_type", ["http", "token"])
-        self.access_token_expires = access_token_expires
-        self.refresh_token_expires = refresh_token_expires
-        self.cli_group = cli_group
 
-        # Resolve JWT secret key:
+        # 1. Route prefixes and integrations:
+        self.auth_prefix = (
+            auth_prefix
+            if auth_prefix is not None
+            else self._auth_prefix
+            if self._auth_prefix is not None
+            else cfg.get("FUA_AUTH_PREFIX", "/auth")
+        )
+        self.user_prefix = (
+            user_prefix
+            if user_prefix is not None
+            else self._user_prefix
+            if self._user_prefix is not None
+            else cfg.get("FUA_USER_PREFIX", "/users")
+        )
+        self.use_flask_login = (
+            flask_login
+            if flask_login is not None
+            else self._use_flask_login
+            if self._use_flask_login is not None
+            else cfg.get("FUA_FLASK_LOGIN", True)
+        )
+        self.refresh_type = (
+            refresh_type
+            or self._refresh_type
+            or cfg.get("FUA_REFRESH_TYPE", ["http", "token"])
+        )
+        self.default_auth_type = (
+            default_auth_type
+            or self._default_auth_type
+            or cfg.get("FUA_DEFAULT_AUTH_TYPE", "both")
+        )
+        self.cli_group = (
+            cli_group
+            if cli_group is not None
+            else self._cli_group
+            if self._cli_group is not None
+            else cfg.get("FUA_CLI_GROUP", "user")
+        )
+
+        # 2. JWT Configuration (FUA_JWT_*):
         self.jwt_secret = (
             jwt_secret
-            or app.config.get("JWT_SECRET_KEY")
-            or app.config.get("SECRET_KEY")
+            or self._jwt_secret
+            or cfg.get("FUA_JWT_SECRET_KEY")
+            or cfg.get("JWT_SECRET_KEY")
+            or cfg.get("SECRET_KEY")
             or "flask-user-auth-secret-change-me"
         )
+
+        acc_exp = (
+            access_token_expires
+            if access_token_expires is not None
+            else self._access_token_expires
+            if self._access_token_expires is not None
+            else cfg.get("FUA_JWT_ACCESS_TOKEN_EXPIRES", 3600)
+        )
+        if isinstance(acc_exp, timedelta):
+            acc_exp = int(acc_exp.total_seconds())
+        self.access_token_expires = int(acc_exp)
+
+        ref_exp = (
+            refresh_token_expires
+            if refresh_token_expires is not None
+            else self._refresh_token_expires
+            if self._refresh_token_expires is not None
+            else cfg.get("FUA_JWT_REFRESH_TOKEN_EXPIRES", 86400 * 30)
+        )
+        if isinstance(ref_exp, timedelta):
+            ref_exp = int(ref_exp.total_seconds())
+        self.refresh_token_expires = int(ref_exp)
+
+        # 3. Cookie Configuration (FUA_COOKIE_*):
+        self.cookie_name = cfg.get("FUA_COOKIE_NAME", "refresh_token")
+        self.cookie_samesite = cfg.get("FUA_COOKIE_SAMESITE", "Lax")
+        self.cookie_secure = cfg.get("FUA_COOKIE_SECURE", False)
+        self.cookie_httponly = cfg.get("FUA_COOKIE_HTTPONLY", True)
+        self.cookie_path = cfg.get("FUA_COOKIE_PATH", "/")
 
         app.extensions = getattr(app, "extensions", {})
         app.extensions["flask_user_auth"] = self
