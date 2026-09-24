@@ -270,3 +270,12 @@ def test_fua_config_settings():
     assert ext.cookie_secure is True
     assert ext.auth_prefix == "/api/v1/auth"
     assert ext.cli_group == "accounts"
+
+def test_login_manager_exposure(app):
+    ext = app.extensions.get("flask_user_auth")
+    assert ext.login_manager is not None
+    # User can configure login_manager directly:
+    ext.login_manager.login_view = "auth.session_login"
+    ext.login_manager.login_message = "Please sign in."
+    assert ext.login_manager.login_view == "auth.session_login"
+    assert ext.login_manager.login_message == "Please sign in."

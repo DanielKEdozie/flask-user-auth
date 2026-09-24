@@ -72,10 +72,15 @@ class Config:
   FUA_COOKIE_HTTPONLY = True  # Prevent JS access (XSS defense)
   FUA_COOKIE_PATH = '/'
 
+  # Flask-Login Session Settings:
+  FUA_FLASK_LOGIN = True
+  FUA_LOGIN_VIEW = 'auth.session_login'  # Redirect view for unauthenticated users
+  FUA_LOGIN_MESSAGE = 'Please log in to access this page.'
+  FUA_LOGIN_MESSAGE_CATEGORY = 'info'
+
   # Routing & Behaviors:
   FUA_AUTH_PREFIX = '/auth'
   FUA_USER_PREFIX = '/users'
-  FUA_FLASK_LOGIN = True
   FUA_REFRESH_TYPE = ['http', 'token']
   FUA_DEFAULT_AUTH_TYPE = 'both'  # 'both', 'session', or 'token'
   FUA_CLI_GROUP = 'user'
@@ -131,6 +136,20 @@ with app.app_context():
 
 ---
 
+
+### Direct Flask-Login Customization
+
+`user_auth.login_manager` directly exposes the `LoginManager` instance for custom configurations:
+
+```python
+user_auth.init_app(app, db=db, user_model=User, auth_model=UserAuth)
+
+# Direct access to Flask-Login settings:
+user_auth.login_manager.login_view = 'auth.session_login'
+user_auth.login_manager.login_message = 'Please sign in to proceed.'
+user_auth.login_manager.login_message_category = 'warning'
+user_auth.login_manager.needs_refresh_message = 'Please re-authenticate.'
+```
 ## Granular Route Protection Decorators
 
 Choose the exact authentication mode for every route:

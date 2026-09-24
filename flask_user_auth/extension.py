@@ -230,7 +230,7 @@ class FlaskUserAuth:
             app.cli.add_command(cli)
 
     def _init_flask_login(self, app: Flask) -> None:
-        """Configure Flask-Login LoginManager."""
+        """Configure Flask-Login LoginManager and expose it on self.login_manager."""
         try:
             from flask_login import LoginManager
             login_manager = getattr(app, "login_manager", None)
@@ -238,12 +238,23 @@ class FlaskUserAuth:
                 login_manager = LoginManager()
                 login_manager.init_app(app)
 
+            self.login_manager = login_manager
+
+            # Auto-configure from config if specified:
+            cfg = app.config
+            if "FUA_LOGIN_VIEW" in cfg:
+                self.login_manager.login_view = cfg["FUA_LOGIN_VIEW"]
+            if "FUA_LOGIN_MESSAGE" in cfg:
+                self.login_manager.login_message = cfg["FUA_LOGIN_MESSAGE"]
+            if "FUA_LOGIN_MESSAGE_CATEGORY" in cfg:
+                self.login_manager.login_message_category = cfg["FUA_LOGIN_MESSAGE_CATEGORY"]
+
             @login_manager.user_loader
             def load_user(user_id):
                 return self.get_user(int(user_id))
 
         except ImportError:
-            pass
+            self.login_manager = None
 
     def _init_user_crud(self, app: Flask) -> None:
         """Configure user CRUD endpoints with ApiBuilder if available."""
