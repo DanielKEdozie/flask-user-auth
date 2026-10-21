@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flask-user-auth"
+version = "0.1.0"
+description = "SQLAlchemy 2.0+ Flask authentication combining Flask-Login sessions and Flask-HTTPAuth + PyJWT tokens"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "flask>=3.0.0",
+    "flask-sqlalchemy>=3.1.0",
+    "sqlalchemy>=2.0.0",
+    "flask-login>=0.6.3",
+    "flask-httpauth>=4.8.0",
+    "pyjwt>=2.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flask_user_auth*"]
