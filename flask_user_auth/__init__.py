@@ -1,3 +1,4 @@
+from .cli import create_auth_cli
 from .core import Auth
 from .decorators import (
     admin_required,
@@ -19,6 +20,7 @@ __all__ = [
     'admin_required',
     'auth_required',
     'create_auth_blueprint',
+    'create_auth_cli',
     'current_user',
     'login_required',
     'token_required',

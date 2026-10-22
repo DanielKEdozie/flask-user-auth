@@ -1,7 +1,22 @@
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+
 from flask_login import UserMixin as FlaskLoginUserMixin
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 from werkzeug.security import check_password_hash, generate_password_hash
+
+
+def _serialize_value(value):
+    """Convert non-JSON-native Python values into serializable primitives."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Enum):
+        return value.value
+    return value
 
 
 class AuthUserMixin(FlaskLoginUserMixin):
@@ -15,6 +30,9 @@ class AuthUserMixin(FlaskLoginUserMixin):
         - ``is_active``: ``Mapped[bool]`` flag (default ``True``), overriding
           ``flask_login.UserMixin.is_active`` with a persistent mapped column
     """
+
+    __serialize_exclude__: tuple[str, ...] = ('password_hash', 'password')
+    __serialize_properties__: tuple[str, ...] = ('full_name',)
 
     id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
     email: Mapped[str] = mapped_column(
@@ -60,16 +78,68 @@ class AuthUserMixin(FlaskLoginUserMixin):
         value = getattr(self, pk_attr, None)
         return str(value) if value is not None else None
 
-    def to_dict(self, exclude: tuple[str, ...] = ('password_hash',)) -> dict:
-        """Serialize base user attributes into a dictionary."""
-        exclude_set = set(exclude or ())
-        data = {
-            'id': getattr(self, 'id', None),
-            'email': getattr(self, 'email', None),
-            'is_admin': bool(getattr(self, 'is_admin', False)),
-            'is_active': bool(getattr(self, 'is_active', True)),
-        }
-        return {k: v for k, v in data.items() if k not in exclude_set}
+    def to_dict(
+        self,
+        exclude: tuple[str, ...] | list[str] | set[str] | None = None,
+        include: tuple[str, ...] | list[str] | set[str] | None = None,
+    ) -> dict:
+        """Serialize all mapped model columns (and configured properties) into a dict.
+
+        Automatically excludes ``password_hash`` and ``password`` by default,
+        plus any field names listed in ``__serialize_exclude__`` or ``exclude``.
+        """
+        default_exclude = set(getattr(self, '__serialize_exclude__', ('password_hash', 'password')))
+        default_exclude.update({'password_hash', 'password'})
+        if exclude:
+            default_exclude.update(exclude)
+
+        include_only = set(include) if include is not None else None
+        data: dict = {}
+
+        # 1. Inspect mapped SQLAlchemy column attributes dynamically
+        try:
+            mapper = sa.inspect(self.__class__)
+            col_keys = [attr.key for attr in mapper.column_attrs]
+        except Exception:
+            table = getattr(self, '__table__', None)
+            if table is not None:
+                col_keys = [col.name for col in table.columns]
+            else:
+                col_keys = ['id', 'email', 'is_admin', 'is_active']
+
+        for key in col_keys:
+            if key in default_exclude:
+                continue
+            if include_only is not None and key not in include_only:
+                continue
+            val = getattr(self, key, None)
+            if key in ('is_admin', 'is_active') and val is not None:
+                val = bool(val)
+            data[key] = _serialize_value(val)
+
+        # 2. Include safe computed properties (e.g. `full_name` or `__serialize_properties__`)
+        prop_keys = list(getattr(self, '__serialize_properties__', ('full_name',)) or ())
+        if include_only is not None:
+            for extra_key in include_only:
+                if extra_key not in data and extra_key not in prop_keys:
+                    prop_keys.append(extra_key)
+
+        for prop in prop_keys:
+            if prop in default_exclude or prop in data:
+                continue
+            if include_only is not None and prop not in include_only:
+                continue
+            if hasattr(self.__class__, prop):
+                try:
+                    data[prop] = _serialize_value(getattr(self, prop))
+                except Exception:
+                    pass
+
+        return data
+
+    def to_auth_dict(self, **kwargs) -> dict:
+        """Alias for :meth:`to_dict`."""
+        return self.to_dict(**kwargs)
 
 
 # Convenient alias matching standard naming

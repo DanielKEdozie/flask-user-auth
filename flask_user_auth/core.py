@@ -2,7 +2,9 @@ from flask import current_app, g, jsonify
 from flask_httpauth import HTTPTokenAuth
 from flask_login import LoginManager
 import sqlalchemy as sa
+from werkzeug.security import generate_password_hash
 
+from .cli import create_auth_cli
 from .decorators import (
     admin_required as _admin_required,
     auth_required as _auth_required,
@@ -44,10 +46,12 @@ class Auth:
         'AUTH_IDENTITY_FIELD': 'email',
         'AUTH_PK_FIELD': 'id',
         'AUTH_REQUIRE_MECHANISM_CHOICE': False,
+        'AUTH_CLI_GROUPS': ('user', 'auth'),
     }
 
     def __init__(self, app=None, model=None, use_session=True, use_token=True,
-                 schema=None, serializer=None, url_prefix=None, db=None):
+                 schema=None, serializer=None, url_prefix=None, db=None,
+                 cli_group=None):
         self.app = app
         self.model = model
         self.use_session = bool(use_session)
@@ -56,11 +60,13 @@ class Auth:
         self.serializer = serializer
         self.url_prefix = url_prefix
         self.db = db
+        self.cli_group = cli_group
 
         self.login_manager = None
         self.http_auth = None
         self.jwt = JWTManager(self)
         self.blueprint = None
+        self.cli = None
 
         self._user_loader_callback = None
         self._authenticate_callback = None
@@ -76,11 +82,12 @@ class Auth:
                 serializer=serializer,
                 url_prefix=url_prefix,
                 db=db,
+                cli_group=cli_group,
             )
 
     def init_app(self, app, model=None, use_session=None, use_token=None,
                  schema=None, serializer=None, url_prefix=None, db=None,
-                 register_blueprint=True):
+                 register_blueprint=True, register_cli=True, cli_group=None):
         """Initialize the extension with a Flask application."""
         if model is not None:
             self.model = model
@@ -96,6 +103,8 @@ class Auth:
             self.url_prefix = url_prefix
         if db is not None:
             self.db = db
+        if cli_group is not None:
+            self.cli_group = cli_group
 
         if self.model is None:
             raise ValueError(
@@ -130,7 +139,35 @@ class Auth:
             )
             app.register_blueprint(self.blueprint)
 
+        if register_cli:
+            self._setup_cli(app)
+
         return self
+
+    def _setup_cli(self, app):
+        """Register CLI command group(s) (``flask user ...`` and ``flask auth ...``)."""
+        if self.cli_group:
+            groups = (
+                (self.cli_group,)
+                if isinstance(self.cli_group, str)
+                else tuple(self.cli_group)
+            )
+        else:
+            raw_groups = app.config.get('AUTH_CLI_GROUPS', ('user', 'auth'))
+            groups = (
+                (raw_groups,)
+                if isinstance(raw_groups, str)
+                else tuple(raw_groups or ('user',))
+            )
+
+        for group_name in groups:
+            if not group_name:
+                continue
+            cmd_group = create_auth_cli(self, name=group_name)
+            if self.cli is None:
+                self.cli = cmd_group
+            if group_name not in app.cli.commands:
+                app.cli.add_command(cmd_group)
 
     def _setup_session_auth(self, app):
         """Configure Flask-Login ``LoginManager`` on ``app``."""
@@ -187,7 +224,7 @@ class Auth:
         g.flask_httpauth_user = user
         return user
 
-    # --- SQLAlchemy 2.0+ session & model resolution --------------------
+    # --- SQLAlchemy 2.0+ session, lookup & user management helpers -----
 
     def _get_db_session(self):
         """Locate the active SQLAlchemy 2.0 ``Session`` from ``self.db`` or ``current_app``."""
@@ -208,6 +245,82 @@ class Auth:
         """Return the primary key value of ``user``."""
         pk_field = current_app.config.get('AUTH_PK_FIELD', 'id')
         return getattr(user, pk_field)
+
+    def get_user_by(self, field, value, fallback_pk=True):
+        """Look up a user by any column ``field == value``.
+
+        If ``fallback_pk=True`` and no match is found on ``field``, also checks
+        the primary key column when ``value`` can be coerced to an integer.
+        """
+        if value is None:
+            return None
+
+        session = self._get_db_session()
+        col = getattr(self.model, field, None)
+        if col is not None:
+            coerced = value
+            try:
+                col_type = getattr(col.property.columns[0], 'type', None)
+                if isinstance(col_type, sa.Integer):
+                    coerced = int(value)
+            except (AttributeError, ValueError, TypeError, IndexError):
+                coerced = None
+
+            if coerced is not None:
+                stmt = sa.select(self.model).where(col == coerced)
+                user = session.scalar(stmt)
+                if user is not None:
+                    return user
+
+        if fallback_pk:
+            pk_field = current_app.config.get('AUTH_PK_FIELD', 'id')
+            if field != pk_field and str(value).isdigit():
+                return self.load_user(int(value))
+
+        return None
+
+    def set_user_password(self, user, raw_password, commit=True):
+        """Set or reset ``user``'s password and optionally commit."""
+        if not raw_password:
+            raise ValueError('Password cannot be empty')
+        setter = getattr(user, 'set_password', None)
+        if callable(setter):
+            setter(raw_password)
+        elif hasattr(user.__class__, 'password'):
+            setattr(user, 'password', raw_password)
+        else:
+            setattr(user, 'password_hash', generate_password_hash(raw_password))
+
+        session = self._get_db_session()
+        session.add(user)
+        if commit:
+            session.commit()
+        return user
+
+    def create_user(self, password=None, commit=True, **fields):
+        """Create and persist a new user (or admin with ``is_admin=True``)."""
+        raw_password = password or fields.pop('password', None)
+        user = self.model(**fields)
+        if raw_password is not None:
+            self.set_user_password(user, raw_password, commit=False)
+        session = self._get_db_session()
+        session.add(user)
+        if commit:
+            session.commit()
+        return user
+
+    def update_user(self, user, password=None, commit=True, **fields):
+        """Update attributes (and optionally password) on ``user`` and commit."""
+        raw_password = password or fields.pop('password', None)
+        for key, val in fields.items():
+            setattr(user, key, val)
+        if raw_password is not None:
+            self.set_user_password(user, raw_password, commit=False)
+        session = self._get_db_session()
+        session.add(user)
+        if commit:
+            session.commit()
+        return user
 
     def load_user(self, identity):
         """Look up a user instance by primary key ``identity`` using SQLAlchemy 2.0."""
@@ -265,8 +378,18 @@ class Auth:
         """Serialize ``user`` using a configured serializer, schema, or ``to_dict()``."""
         if user is None:
             return None
-        if callable(self.serializer):
-            return self.serializer(user)
+        if self.serializer is not None:
+            if hasattr(self.serializer, 'dump') or (
+                isinstance(self.serializer, type) and hasattr(self.serializer, 'dump')
+            ):
+                schema_inst = (
+                    self.serializer()
+                    if isinstance(self.serializer, type)
+                    else self.serializer
+                )
+                return schema_inst.dump(user)
+            if callable(self.serializer):
+                return self.serializer(user)
         if self.schema is not None:
             schema_inst = (
                 self.schema() if isinstance(self.schema, type) else self.schema
@@ -275,6 +398,9 @@ class Auth:
         to_dict = getattr(user, 'to_dict', None)
         if callable(to_dict):
             return to_dict()
+        to_auth_dict = getattr(user, 'to_auth_dict', None)
+        if callable(to_auth_dict):
+            return to_auth_dict()
         return {
             'id': getattr(user, 'id', None),
             'email': getattr(user, 'email', None),

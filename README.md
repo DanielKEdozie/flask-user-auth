@@ -318,3 +318,32 @@ def check_if_token_revoked(jwt_payload: dict) -> bool:
     stmt = sa.select(RevokedToken).where(RevokedToken.jti == jti)
     return db.session.scalar(stmt) is not None
 ```
+
+---
+
+## CLI Commands (`flask user` / `flask auth`)
+
+When `auth.init_app(app, model=User)` is called, `flask_user_auth` automatically registers CLI command groups (`flask user` and `flask auth`, configurable via `AUTH_CLI_GROUPS` or `cli_group`):
+
+```bash
+# 1. Create a user (prompts for password if -p is omitted; accepts -f key=value or --<column> <value>)
+flask user create alice@example.com -p secret123 --first-name Alice --last-name Obi -f phone=08030001111
+
+# 2. Create an admin user (via --admin flag or dedicated create-admin command)
+flask user create admin@example.com -p admin123 --admin
+flask user create-admin boss@example.com -p admin123 --first-name Boss
+
+# 3. Update a user by any field (--by defaults to email/id, or pass any model column)
+flask user update alice@example.com --first-name Alicia --admin
+flask user update 08030001111 --by phone -f first_name=Adaeze --inactive
+
+# 4. Set or reset a user's password (explicit -p, interactive prompt, or --generate)
+flask user set-password alice@example.com -p newsecret99
+flask user reset-password alice@example.com
+flask user reset-password boss@example.com --generate
+
+# 5. Inspect users (outputs serialized to_dict() JSON)
+flask user show alice@example.com
+flask user list --admin
+```
+
