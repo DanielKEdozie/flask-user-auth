@@ -11,9 +11,10 @@ Clients can choose at login time whether to authenticate via **session**, **toke
 - **SQLAlchemy 2.0+ Native**: Uses `Mapped[...]` and `mapped_column(...)` on [`AuthUserMixin`](file:///c:/Users/danni/OneDrive/Desktop/project-3/foodmart/packages/flask_user_auth/mixins.py#L7-L79) and `session.scalar(sa.select(...))` queries throughout.
 - **Dual Auth Mechanics**: Enable session auth (`use_session=True`), token auth (`use_token=True`), or both on your Flask app.
 - **Per-Login Selection**: `POST /auth/login` accepts `{"session": bool, "token": bool}` in its JSON payload so clients (web apps, mobile apps, SPAs, CLI tools) can pick one or both mechanics on the fly.
-- **Built-in SQLAlchemy 2.0 Mixin (`UserMixin` / `AuthUserMixin`)**: Provides `id`, `email`, `password_hash`, `is_admin`, `is_active`, password hashing helpers (`password` setter, `set_password`, `check_password`), and `to_dict()` serialization.
+- **Built-in SQLAlchemy 2.0 Mixin (`UserMixin` / `AuthUserMixin`)**: Provides `id`, `email`, `password_hash`, `is_admin`, `is_active`, password hashing helpers (`password` setter, `set_password`, `check_password`), and dynamic `to_dict(include=..., exclude=...)` serialization across all mapped model columns.
 - **Ready-to-Use Endpoints**: Mounts `/login`, `/logout`, `/refresh`, and `/me` under `AUTH_URL_PREFIX` (default `'/auth'`).
-- **Flexible Route Decorators**: Exported `login_required`, `token_required`, `auth_required` (supports `@auth_required`, `@auth_required()`, `@auth_required('session')`, `@auth_required('token')`, `@auth_required(session=True, token=True)`), and `admin_required`.
+- **Built-in Flask CLI (`flask user` / `flask auth`)**: Create users/admins, update user fields by any column, set/reset passwords, and list/inspect users from the terminal.
+- **Flexible Route Decorators with Optional `redirect`**: Exported `login_required`, `token_required`, `auth_required`, and `admin_required` return JSON `401` by default or redirect to a login page (`?next=...`) when `redirect='/login'` (or an endpoint name / `url_for` callable) is passed.
 - **Unified `current_user` Proxy**: Resolves the active user regardless of whether the request authenticated via Flask-Login session or Flask-HTTPAuth Bearer token.
 
 ---
@@ -286,6 +287,28 @@ def hybrid():
 # Or restrict to token-only admin: @token_required(admin=True) / @auth_required('token', admin=True)
 def delete_user(user_id):
     return jsonify({'deleted': user_id})
+
+
+# 6. Redirect Unauthenticated Requests (Browser Views)
+# When `redirect` is omitted, decorators return a JSON 401 response.
+# Pass `redirect` (URL path, Flask endpoint name, or callable) to redirect with `?next=<current_path>`:
+@app.get('/account')
+@login_required(redirect='/login')
+# Or positional shorthand: @login_required('/login')
+def account_page():
+    return render_template('account.html')
+
+
+@app.get('/checkout')
+@auth_required(redirect='store.login')
+def checkout_page():
+    return render_template('checkout.html')
+
+
+@app.get('/admin/panel')
+@admin_required(redirect=lambda: url_for('admin.login'))
+def admin_panel():
+    return render_template('admin/panel.html')
 ```
 
 ---
