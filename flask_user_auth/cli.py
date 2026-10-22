@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 def _coerce_column_value(model: type, field_name: str, raw_value: Any) -> Any:
-    """Coerce a CLI string value to the appropriate SQLAlchemy column Python type."""
-    if not isinstance(raw_value, str):
+    """Coerce a CLI value to the appropriate SQLAlchemy column Python type."""
+    if raw_value is None or not isinstance(raw_value, str):
         return raw_value
 
     col = getattr(model, field_name, None)
@@ -48,49 +48,148 @@ def _coerce_column_value(model: type, field_name: str, raw_value: Any) -> Any:
     return raw_value
 
 
-def _parse_extra_fields(
-    model: type,
-    field_items: tuple[str, ...],
-    extra_args: list[str],
-) -> dict[str, Any]:
-    """Parse both `-f key=value` pairs and `--<column-name> <value>` extra CLI flags."""
-    updates: dict[str, Any] = {}
+def normalize_cli_extra_fields(
+    cli_extra_fields: dict[str, Any] | list[str] | tuple[str, ...] | None,
+) -> dict[str, dict[str, Any]]:
+    """Normalize ``cli_extra_fields`` into a canonical ``{field_name: spec_dict}`` mapping.
 
-    # 1. Parse `-f key=value` / `--field key=value`
-    for item in field_items or ():
-        if '=' not in item:
-            raise click.BadParameter(
-                f"Invalid --field value {item!r}. Expected format: KEY=VALUE (e.g. -f first_name=Ada)."
-            )
-        key, val = item.split('=', 1)
-        key = key.strip().replace('-', '_')
-        if not key:
-            raise click.BadParameter(f"Empty field name in {item!r}.")
-        updates[key] = _coerce_column_value(model, key, val)
+    Supported per-field options in ``spec_dict``:
+        - ``flag`` / ``flags``: ``'--first-name'`` or ``('-fn', '--first-name')``
+          (defaults to ``f"--{field_name.replace('_', '-')}"``)
+        - ``placeholder``: Example / placeholder text shown in ``--help`` metavar and interactive prompts
+        - ``prompt``: ``bool`` or ``str`` prompt label used during ``create`` / ``create-admin``
+          when the option is not passed on the command line
+        - ``default``: Default value when omitted on ``create``
+        - ``required``: Whether a non-empty value is required on ``create`` (default ``False``)
+        - ``help``: Custom option help text for ``--help``
+        - ``type``: Click/Python type converter (auto-coerced from SQLAlchemy column if omitted)
+        - ``hide_input``: Hide input when prompting interactively (default ``False``)
+    """
+    if not cli_extra_fields:
+        return {}
 
-    # 2. Parse arbitrary `--col-name val` or `--col-name=val` in `ctx.args`
-    idx = 0
-    while idx < len(extra_args):
-        token = extra_args[idx]
-        if token.startswith('--'):
-            stripped = token[2:]
-            if '=' in stripped:
-                raw_key, raw_val = stripped.split('=', 1)
-                idx += 1
-            else:
-                raw_key = stripped
-                if idx + 1 < len(extra_args) and not extra_args[idx + 1].startswith('--'):
-                    raw_val = extra_args[idx + 1]
-                    idx += 2
-                else:
-                    raw_val = 'true'
-                    idx += 1
-            key = raw_key.strip().replace('-', '_')
-            updates[key] = _coerce_column_value(model, key, raw_val)
+    raw_map: dict[str, Any]
+    if isinstance(cli_extra_fields, (list, tuple, set)):
+        raw_map = {str(name): {} for name in cli_extra_fields if name}
+    elif isinstance(cli_extra_fields, dict):
+        raw_map = dict(cli_extra_fields)
+    else:
+        return {}
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for field_name, raw_spec in raw_map.items():
+        if not field_name or not isinstance(field_name, str):
+            continue
+        clean_name = field_name.strip()
+        if isinstance(raw_spec, str):
+            spec: dict[str, Any] = {'flag': raw_spec}
+        elif isinstance(raw_spec, dict):
+            spec = dict(raw_spec)
         else:
-            idx += 1
+            spec = {}
 
-    return updates
+        default_flag = f"--{clean_name.replace('_', '-')}"
+        raw_flag = spec.get('flag') or spec.get('flags') or default_flag
+        if isinstance(raw_flag, str):
+            flags = (raw_flag.strip(),)
+        elif isinstance(raw_flag, (list, tuple)):
+            flags = tuple(str(f).strip() for f in raw_flag if f)
+        else:
+            flags = (default_flag,)
+
+        label = clean_name.replace('_', ' ').capitalize()
+        placeholder = spec.get('placeholder')
+        prompt_cfg = spec.get('prompt', False)
+        if prompt_cfg is True:
+            prompt_text: str | None = label
+        elif isinstance(prompt_cfg, str) and prompt_cfg.strip():
+            prompt_text = prompt_cfg.strip()
+        else:
+            prompt_text = None
+
+        help_text = spec.get('help') or (
+            f"{label} (e.g. {placeholder})." if placeholder else f"{label}."
+        )
+
+        normalized[clean_name] = {
+            'field_name': clean_name,
+            'flags': flags,
+            'placeholder': str(placeholder) if placeholder is not None else None,
+            'prompt': prompt_text,
+            'default': spec.get('default'),
+            'required': bool(spec.get('required', False)),
+            'help': help_text,
+            'type': spec.get('type'),
+            'hide_input': bool(spec.get('hide_input', False)),
+        }
+
+    return normalized
+
+
+def _attach_extra_field_options(
+    extra_specs: dict[str, dict[str, Any]],
+):
+    """Decorator that attaches Click options for each configured ``cli_extra_fields`` entry."""
+    def decorator(fn):
+        for field_name, spec in reversed(list(extra_specs.items())):
+            param_decls = (*spec['flags'], f"extra__{field_name}")
+            option_kwargs: dict[str, Any] = {
+                'default': None,
+                'help': spec['help'],
+            }
+            if spec['placeholder']:
+                option_kwargs['metavar'] = spec['placeholder']
+            if spec['type'] is not None:
+                option_kwargs['type'] = spec['type']
+            fn = click.option(*param_decls, **option_kwargs)(fn)
+        return fn
+
+    return decorator
+
+
+def _collect_extra_field_values(
+    model: type,
+    extra_specs: dict[str, dict[str, Any]],
+    kwargs: dict[str, Any],
+    *,
+    is_create: bool,
+) -> dict[str, Any]:
+    """Extract and coerce ``cli_extra_fields`` values from Click kwargs (prompting on create if configured)."""
+    values: dict[str, Any] = {}
+    for field_name, spec in extra_specs.items():
+        raw_val = kwargs.pop(f"extra__{field_name}", None)
+
+        if raw_val is None and is_create and spec['prompt']:
+            prompt_label = spec['prompt']
+            if spec['placeholder']:
+                prompt_label = f"{prompt_label} [{spec['placeholder']}]"
+            default_for_prompt = (
+                spec['default']
+                if spec['default'] is not None
+                else ('' if not spec['required'] else None)
+            )
+            prompted = click.prompt(
+                prompt_label,
+                default=default_for_prompt,
+                show_default=spec['default'] is not None,
+                hide_input=spec['hide_input'],
+            )
+            if prompted != '' or spec['default'] is not None:
+                raw_val = prompted
+
+        if raw_val is None and is_create and spec['default'] is not None:
+            raw_val = spec['default']
+
+        if raw_val is None and is_create and spec['required']:
+            flag_display = '/'.join(spec['flags'])
+            raise click.ClickException(
+                f"Missing required field '{field_name}' (pass {flag_display})."
+            )
+
+        if raw_val is not None:
+            values[field_name] = _coerce_column_value(model, field_name, raw_val)
+
+    return values
 
 
 def _validate_model_fields(model: type, fields: dict[str, Any]) -> None:
@@ -102,32 +201,40 @@ def _validate_model_fields(model: type, fields: dict[str, Any]) -> None:
             )
 
 
-def create_auth_cli(auth, name: str = 'user') -> AppGroup:
+def create_auth_cli(
+    auth,
+    name: str = 'user',
+    cli_extra_fields: dict[str, Any] | list[str] | tuple[str, ...] | None = None,
+) -> AppGroup:
     """Create a Flask CLI ``AppGroup`` for managing users and passwords.
 
     Commands:
-        - ``create`` / ``create-user``: Create a user (supports ``--admin``, ``-f key=val``, ``--<col> <val>``)
+        - ``create`` / ``create-user``: Create a user (supports ``--admin`` and ``cli_extra_fields``)
         - ``create-admin``: Create an administrator user (``is_admin=True``)
-        - ``update``: Update a user by any lookup field (``--by email|id|phone|...``)
+        - ``update``: Update a user by any lookup field (``--by email|id|...``)
         - ``set-password``: Set a user's password by any lookup field
         - ``reset-password``: Reset a user's password (interactive prompt, ``--password``, or ``--generate``)
         - ``list``: List users
         - ``show``: Display serialized user JSON (``to_dict()``)
     """
+    extra_specs = normalize_cli_extra_fields(
+        cli_extra_fields if cli_extra_fields is not None else getattr(auth, 'cli_extra_fields', None)
+    )
     cli = AppGroup(name, help='Manage application users, admins, and passwords (flask-user-auth).')
 
     def _run_create(
-        ctx: click.Context,
         identity: str | None,
         email_opt: str | None,
         password: str | None,
         is_admin: bool,
         is_active: bool,
-        field_items: tuple[str, ...],
+        extra_kwargs: dict[str, Any],
     ) -> None:
         model = auth.model
         identity_field = current_app.config.get('AUTH_IDENTITY_FIELD', 'email')
-        extra = _parse_extra_fields(model, field_items, list(ctx.args))
+        extra = _collect_extra_field_values(
+            model, extra_specs, extra_kwargs, is_create=True
+        )
 
         resolved_identity = (
             email_opt
@@ -138,8 +245,6 @@ def create_auth_cli(auth, name: str = 'user') -> AppGroup:
         if isinstance(resolved_identity, str):
             resolved_identity = resolved_identity.strip()
 
-        if not password:
-            password = extra.pop('password', None)
         if not password:
             password = click.prompt(
                 'Password', hide_input=True, confirmation_prompt=True
@@ -166,72 +271,39 @@ def create_auth_cli(auth, name: str = 'user') -> AppGroup:
         )
         click.echo(json.dumps(auth.serialize_user(user), indent=2, default=str))
 
-    @cli.command(
-        'create',
-        context_settings={'ignore_unknown_options': True, 'allow_extra_args': True},
-    )
+    @cli.command('create')
     @click.argument('identity', required=False)
     @click.option('-e', '--email', 'email_opt', help='User email / identity value.')
     @click.option('-p', '--password', help='User password (prompts if omitted).')
     @click.option('--admin/--no-admin', 'is_admin', default=False, help='Grant admin privileges.')
     @click.option('--active/--inactive', 'is_active', default=True, help='Set account active status.')
-    @click.option(
-        '-f',
-        '--field',
-        'field_items',
-        multiple=True,
-        metavar='KEY=VALUE',
-        help='Set additional model field(s), e.g. -f first_name=Adaeze -f phone=08030001111.',
-    )
-    @click.pass_context
-    def create_cmd(ctx, identity, email_opt, password, is_admin, is_active, field_items):
-        """Create a new user (pass --admin for an administrator).
+    @_attach_extra_field_options(extra_specs)
+    def create_cmd(identity, email_opt, password, is_admin, is_active, **extra_kwargs):
+        """Create a new user (pass --admin for an administrator)."""
+        _run_create(identity, email_opt, password, is_admin, is_active, extra_kwargs)
 
-        Any extra model columns can be passed either via `-f key=value` or directly
-        as `--<field-name> <value>` (e.g. `--first-name Adaeze --phone 08030001111`).
-        """
-        _run_create(ctx, identity, email_opt, password, is_admin, is_active, field_items)
-
-    @cli.command(
-        'create-user',
-        context_settings={'ignore_unknown_options': True, 'allow_extra_args': True},
-    )
+    @cli.command('create-user')
     @click.argument('identity', required=False)
     @click.option('-e', '--email', 'email_opt', help='User email / identity value.')
     @click.option('-p', '--password', help='User password (prompts if omitted).')
     @click.option('--admin/--no-admin', 'is_admin', default=False, help='Grant admin privileges.')
     @click.option('--active/--inactive', 'is_active', default=True, help='Set account active status.')
-    @click.option('-f', '--field', 'field_items', multiple=True, metavar='KEY=VALUE')
-    @click.pass_context
-    def create_user_cmd(ctx, identity, email_opt, password, is_admin, is_active, field_items):
+    @_attach_extra_field_options(extra_specs)
+    def create_user_cmd(identity, email_opt, password, is_admin, is_active, **extra_kwargs):
         """Alias for `create`: create a new user account."""
-        _run_create(ctx, identity, email_opt, password, is_admin, is_active, field_items)
+        _run_create(identity, email_opt, password, is_admin, is_active, extra_kwargs)
 
-    @cli.command(
-        'create-admin',
-        context_settings={'ignore_unknown_options': True, 'allow_extra_args': True},
-    )
+    @cli.command('create-admin')
     @click.argument('identity', required=False)
     @click.option('-e', '--email', 'email_opt', help='Admin email / identity value.')
     @click.option('-p', '--password', help='Admin password (prompts if omitted).')
     @click.option('--active/--inactive', 'is_active', default=True, help='Set account active status.')
-    @click.option(
-        '-f',
-        '--field',
-        'field_items',
-        multiple=True,
-        metavar='KEY=VALUE',
-        help='Set additional model field(s), e.g. -f first_name=Chidi -f last_name=Nwosu.',
-    )
-    @click.pass_context
-    def create_admin_cmd(ctx, identity, email_opt, password, is_active, field_items):
+    @_attach_extra_field_options(extra_specs)
+    def create_admin_cmd(identity, email_opt, password, is_active, **extra_kwargs):
         """Create a new administrator user (`is_admin=True`)."""
-        _run_create(ctx, identity, email_opt, password, True, is_active, field_items)
+        _run_create(identity, email_opt, password, True, is_active, extra_kwargs)
 
-    @cli.command(
-        'update',
-        context_settings={'ignore_unknown_options': True, 'allow_extra_args': True},
-    )
+    @cli.command('update')
     @click.argument('identifier')
     @click.option(
         '-b',
@@ -240,42 +312,39 @@ def create_auth_cli(auth, name: str = 'user') -> AppGroup:
         default=None,
         help='Field name to look up user by (defaults to AUTH_IDENTITY_FIELD or id).',
     )
+    @click.option('-e', '--email', 'email_val', default=None, help='Update user email.')
     @click.option('--admin/--no-admin', 'is_admin', default=None, help='Toggle admin status.')
     @click.option('--active/--inactive', 'is_active', default=None, help='Toggle active status.')
     @click.option('-p', '--password', default=None, help='Optionally update password.')
-    @click.option(
-        '-f',
-        '--field',
-        'field_items',
-        multiple=True,
-        metavar='KEY=VALUE',
-        help='Field(s) to update, e.g. -f first_name=Ngozi -f phone=08099998888.',
-    )
-    @click.pass_context
-    def update_cmd(ctx, identifier, by_field, is_admin, is_active, password, field_items):
-        """Update a user looked up by `--by <field>` (default: email or id).
-
-        Examples:
-            flask user update customer@foodmart.ng --first-name Ngozi --admin
-            flask user update 2 --by id -f phone=08099998888 -f first_name=Chidi
-        """
+    @_attach_extra_field_options(extra_specs)
+    def update_cmd(identifier, by_field, email_val, is_admin, is_active, password, **extra_kwargs):
+        """Update a user looked up by `--by <field>` (default: email or id)."""
         model = auth.model
-        lookup_field = by_field or current_app.config.get('AUTH_IDENTITY_FIELD', 'email')
+        identity_field = current_app.config.get('AUTH_IDENTITY_FIELD', 'email')
+        lookup_field = by_field or identity_field
         user = auth.get_user_by(lookup_field, identifier, fallback_pk=(by_field is None))
         if user is None:
             raise click.ClickException(
                 f"User not found with {lookup_field}={identifier!r}."
             )
 
-        updates = _parse_extra_fields(model, field_items, list(ctx.args))
+        updates = _collect_extra_field_values(
+            model, extra_specs, extra_kwargs, is_create=False
+        )
+        if email_val is not None:
+            updates[identity_field] = email_val.strip()
         if is_admin is not None:
             updates['is_admin'] = bool(is_admin)
         if is_active is not None:
             updates['is_active'] = bool(is_active)
 
         if not updates and not password:
+            configured_flags = ', '.join(
+                spec['flags'][-1] for spec in extra_specs.values()
+            )
+            hint = f", {configured_flags}" if configured_flags else ''
             raise click.ClickException(
-                'No fields provided to update. Pass -f KEY=VALUE, --<field> <val>, --admin, --active, or -p.'
+                f"No fields provided to update. Pass --email, --admin, --active, -p{hint}."
             )
 
         _validate_model_fields(model, updates)

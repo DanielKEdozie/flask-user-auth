@@ -346,19 +346,52 @@ def check_if_token_revoked(jwt_payload: dict) -> bool:
 
 ## CLI Commands (`flask user` / `flask auth`)
 
-When `auth.init_app(app, model=User)` is called, `flask_user_auth` automatically registers CLI command groups (`flask user` and `flask auth`, configurable via `AUTH_CLI_GROUPS` or `cli_group`):
+When `auth.init_app(app, model=User)` is called, `flask_user_auth` automatically registers CLI command groups (`flask user` and `flask auth`, configurable via `AUTH_CLI_GROUPS` or `cli_group`).
+
+### Configuring Custom Model Fields (`cli_extra_fields`)
+
+Pass `cli_extra_fields` to `Auth(...)` or `auth.init_app(...)` (or `app.config['AUTH_CLI_EXTRA_FIELDS']`) to register extra model columns as typed Click options on `create`, `create-user`, `create-admin`, and `update`:
+
+```python
+auth.init_app(
+    app,
+    model=User,
+    cli_extra_fields={
+        'first_name': {
+            'flag': ('-fn', '--first-name'),   # str or tuple of flags (defaults to '--<field-name>')
+            'placeholder': 'Adaeze',           # metavar in --help & hint in interactive prompt
+            'prompt': 'First name',            # True or str prompt label on create when flag is omitted
+            'required': False,                 # require non-empty value on create
+            'default': None,                   # default value on create when omitted
+            'help': 'User first name.',        # custom --help description
+        },
+        'last_name': {
+            'flag': ('-ln', '--last-name'),
+            'placeholder': 'Obi',
+            'prompt': 'Last name',
+        },
+        'phone': {
+            'flag': ('-ph', '--phone'),
+            'placeholder': '08030001111',
+            'prompt': False,
+        },
+    },
+)
+```
+
+### Usage Examples
 
 ```bash
-# 1. Create a user (prompts for password if -p is omitted; accepts -f key=value or --<column> <value>)
-flask user create alice@example.com -p secret123 --first-name Alice --last-name Obi -f phone=08030001111
+# 1. Create a user (prompts for password and any cli_extra_fields with prompt enabled if omitted)
+flask user create alice@example.com -p secret123 --first-name Alice --last-name Obi --phone 08030001111
 
 # 2. Create an admin user (via --admin flag or dedicated create-admin command)
-flask user create admin@example.com -p admin123 --admin
-flask user create-admin boss@example.com -p admin123 --first-name Boss
+flask user create admin@example.com -p admin123 --admin -fn Admin -ln User
+flask user create-admin boss@example.com -p admin123 --first-name Boss --last-name Nwosu
 
 # 3. Update a user by any field (--by defaults to email/id, or pass any model column)
 flask user update alice@example.com --first-name Alicia --admin
-flask user update 08030001111 --by phone -f first_name=Adaeze --inactive
+flask user update 08030001111 --by phone --first-name Adaeze --inactive
 
 # 4. Set or reset a user's password (explicit -p, interactive prompt, or --generate)
 flask user set-password alice@example.com -p newsecret99

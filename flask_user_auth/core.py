@@ -47,11 +47,12 @@ class Auth:
         'AUTH_PK_FIELD': 'id',
         'AUTH_REQUIRE_MECHANISM_CHOICE': False,
         'AUTH_CLI_GROUPS': ('user', 'auth'),
+        'AUTH_CLI_EXTRA_FIELDS': None,
     }
 
     def __init__(self, app=None, model=None, use_session=True, use_token=True,
                  schema=None, serializer=None, url_prefix=None, db=None,
-                 cli_group=None):
+                 cli_group=None, cli_extra_fields=None):
         self.app = app
         self.model = model
         self.use_session = bool(use_session)
@@ -61,6 +62,7 @@ class Auth:
         self.url_prefix = url_prefix
         self.db = db
         self.cli_group = cli_group
+        self.cli_extra_fields = cli_extra_fields
 
         self.login_manager = None
         self.http_auth = None
@@ -83,11 +85,13 @@ class Auth:
                 url_prefix=url_prefix,
                 db=db,
                 cli_group=cli_group,
+                cli_extra_fields=cli_extra_fields,
             )
 
     def init_app(self, app, model=None, use_session=None, use_token=None,
                  schema=None, serializer=None, url_prefix=None, db=None,
-                 register_blueprint=True, register_cli=True, cli_group=None):
+                 register_blueprint=True, register_cli=True, cli_group=None,
+                 cli_extra_fields=None):
         """Initialize the extension with a Flask application."""
         if model is not None:
             self.model = model
@@ -105,6 +109,8 @@ class Auth:
             self.db = db
         if cli_group is not None:
             self.cli_group = cli_group
+        if cli_extra_fields is not None:
+            self.cli_extra_fields = cli_extra_fields
 
         if self.model is None:
             raise ValueError(
@@ -113,6 +119,9 @@ class Auth:
 
         for key, default_val in self.DEFAULT_CONFIG.items():
             app.config.setdefault(key, default_val)
+
+        if self.cli_extra_fields is None and app.config.get('AUTH_CLI_EXTRA_FIELDS'):
+            self.cli_extra_fields = app.config['AUTH_CLI_EXTRA_FIELDS']
 
         if not app.config.get('JWT_SECRET_KEY') and app.config.get('SECRET_KEY'):
             app.config['JWT_SECRET_KEY'] = app.config['SECRET_KEY']
@@ -163,7 +172,11 @@ class Auth:
         for group_name in groups:
             if not group_name:
                 continue
-            cmd_group = create_auth_cli(self, name=group_name)
+            cmd_group = create_auth_cli(
+                self,
+                name=group_name,
+                cli_extra_fields=self.cli_extra_fields,
+            )
             if self.cli is None:
                 self.cli = cmd_group
             if group_name not in app.cli.commands:
