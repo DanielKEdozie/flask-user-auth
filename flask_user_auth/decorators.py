@@ -1,8 +1,10 @@
 from functools import wraps
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from flask import current_app, g, jsonify
+from flask import current_app, g, jsonify, redirect as flask_redirect, request, url_for
 from flask_login import current_user as flask_login_current_user
 from werkzeug.local import LocalProxy
+from werkzeug.routing import BuildError
 
 
 def get_auth_extension(app=None):
@@ -42,6 +44,36 @@ def _resolve_current_user():
 current_user = LocalProxy(_resolve_current_user)
 
 _AUTH_MODE_KEYWORDS = {'session', 'token', 'jwt', 'both', 'all'}
+
+
+def _build_redirect_url(target) -> str:
+    """Resolve a URL path, Flask endpoint name, or callable into a redirect URL with ``?next=...``."""
+    resolved = target() if callable(target) else target
+    resolved = str(resolved).strip()
+
+    if resolved.startswith(('/', 'http://', 'https://')):
+        base_url = resolved
+    else:
+        try:
+            base_url = url_for(resolved)
+        except BuildError:
+            base_url = resolved
+
+    next_path = request.full_path.rstrip('?') if request.query_string else request.path
+    if not next_path:
+        return base_url
+
+    parsed = urlparse(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault('next', next_path)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _unauthorized_response(message: str, status_code: int = 401, redirect=None):
+    """Redirect to ``redirect`` if provided on the decorator, otherwise return JSON."""
+    if redirect:
+        return flask_redirect(_build_redirect_url(redirect))
+    return jsonify({'message': message}), status_code
 
 
 def _normalize_auth_modes(args, session, token, ext=None):
@@ -158,7 +190,7 @@ def auth_required(*args, session=None, token=None, admin=False,
                     msg = 'Session authentication required'
                 else:
                     msg = token_error_message or 'Authentication required'
-                return ext.unauthorized_response(msg, 401, redirect=redirect)
+                return _unauthorized_response(msg, 401, redirect=redirect)
 
             if not getattr(user, 'is_active', True):
                 return jsonify({'message': 'Account is inactive'}), 403

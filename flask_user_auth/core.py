@@ -1,10 +1,7 @@
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-
-from flask import current_app, g, jsonify, redirect as flask_redirect, request, url_for
+from flask import current_app, g, jsonify
 from flask_httpauth import HTTPTokenAuth
 from flask_login import LoginManager
 import sqlalchemy as sa
-from werkzeug.routing import BuildError
 from werkzeug.security import generate_password_hash
 
 from .cli import create_auth_cli
@@ -50,7 +47,6 @@ class Auth:
         'AUTH_PK_FIELD': 'id',
         'AUTH_REQUIRE_MECHANISM_CHOICE': False,
         'AUTH_CLI_GROUPS': ('user', 'auth'),
-        'AUTH_REDIRECT_NEXT_PARAM': 'next',
     }
 
     def __init__(self, app=None, model=None, use_session=True, use_token=True,
@@ -172,50 +168,6 @@ class Auth:
                 self.cli = cmd_group
             if group_name not in app.cli.commands:
                 app.cli.add_command(cmd_group)
-
-    # --- Redirect & Unauthorized Handling ------------------------------
-
-    def build_redirect_url(self, target, include_next: bool = True) -> str:
-        """Resolve a URL path, Flask endpoint name, or callable into a redirect URL.
-
-        Automatically appends ``?next=<current_path>`` unless ``include_next=False``.
-        """
-        resolved = target() if callable(target) else target
-        resolved = str(resolved).strip()
-
-        if resolved.startswith(('/', 'http://', 'https://')):
-            base_url = resolved
-        else:
-            try:
-                base_url = url_for(resolved)
-            except BuildError:
-                base_url = resolved
-
-        next_param = current_app.config.get('AUTH_REDIRECT_NEXT_PARAM', 'next')
-        if not include_next or not next_param:
-            return base_url
-
-        next_path = request.full_path.rstrip('?') if request.query_string else request.path
-        if not next_path:
-            return base_url
-
-        parsed = urlparse(base_url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        query.setdefault(next_param, next_path)
-        new_query = urlencode(query)
-        return urlunparse(parsed._replace(query=new_query))
-
-    def unauthorized_response(
-        self,
-        message: str = 'Authentication required',
-        status_code: int = 401,
-        *,
-        redirect=None,
-    ):
-        """Return a redirect response if ``redirect`` is provided, otherwise a JSON response."""
-        if redirect:
-            return flask_redirect(self.build_redirect_url(redirect))
-        return jsonify({'message': message}), status_code
 
     def _setup_session_auth(self, app):
         """Configure Flask-Login ``LoginManager`` on ``app``."""
