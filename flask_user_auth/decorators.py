@@ -82,30 +82,24 @@ def _normalize_auth_modes(args, session, token, ext=None):
     return bool(session), bool(token)
 
 
-def auth_required(*args, session=None, token=None, admin=False, auth_ext=None):
+def auth_required(*args, session=None, token=None, admin=False,
+                  login_view=None, enable_redirect=None, auth_ext=None):
     """Protect an endpoint using session (Flask-Login), token (Flask-HTTPAuth), or both.
 
-    Supported usages::
-
-        @auth_required
-        def view(): ...
-
-        @auth_required()
-        def view(): ...
-
-        @auth_required('session')
-        @auth_required('token')
-        @auth_required('session', 'token')
-        def view(): ...
-
-        @auth_required(session=True)
-        @auth_required(token=True)
-        @auth_required(session=True, token=True)
-        @auth_required(admin=True)
-        def view(): ...
+    When unauthenticated, redirects to ``login_view`` or ``bp_login_views[request.blueprint]``
+    if configured and enabled via ``enable_redirect`` (e.g. ``'session'``, ``'token'``,
+    or ``('session', 'token')``); otherwise returns a JSON 401 response.
     """
     direct_fn = None
-    if len(args) == 1 and callable(args[0]) and session is None and token is None and not admin:
+    if (
+        len(args) == 1
+        and callable(args[0])
+        and session is None
+        and token is None
+        and not admin
+        and login_view is None
+        and enable_redirect is None
+    ):
         direct_fn = args[0]
         args = ()
 
@@ -125,7 +119,6 @@ def auth_required(*args, session=None, token=None, admin=False, auth_ext=None):
             if allow_token and ext.use_token:
                 raw_token = ext.jwt.extract_bearer_token()
                 if raw_token:
-                    # Run through flask-httpauth verification pipeline
                     verified_user = ext._verify_token_with_http_auth(raw_token)
                     if verified_user is not None:
                         user = verified_user
@@ -152,7 +145,14 @@ def auth_required(*args, session=None, token=None, admin=False, auth_ext=None):
                     msg = 'Session authentication required'
                 else:
                     msg = token_error_message or 'Authentication required'
-                return jsonify({'message': msg}), 401
+                return ext.unauthorized_response(
+                    msg,
+                    401,
+                    allow_session=allow_session,
+                    allow_token=allow_token,
+                    login_view=login_view,
+                    enable_redirect=enable_redirect,
+                )
 
             if not getattr(user, 'is_active', True):
                 return jsonify({'message': 'Account is inactive'}), 403
@@ -171,30 +171,84 @@ def auth_required(*args, session=None, token=None, admin=False, auth_ext=None):
     return decorator
 
 
-def login_required(*args, admin=False, auth_ext=None):
+def login_required(*args, admin=False, login_view=None, enable_redirect=None,
+                   auth_ext=None):
     """Require Flask-Login session authentication.
 
-    Can be used as ``@login_required`` or ``@login_required(admin=True)``.
+    Can be used as ``@login_required`` or ``@login_required(admin=True, login_view='/login')``.
     """
-    if len(args) == 1 and callable(args[0]) and not admin:
-        return auth_required(session=True, token=False, auth_ext=auth_ext)(args[0])
-    return auth_required(session=True, token=False, admin=admin, auth_ext=auth_ext)
+    if (
+        len(args) == 1
+        and callable(args[0])
+        and not admin
+        and login_view is None
+        and enable_redirect is None
+    ):
+        return auth_required(
+            session=True,
+            token=False,
+            login_view=login_view,
+            enable_redirect=enable_redirect,
+            auth_ext=auth_ext,
+        )(args[0])
+    return auth_required(
+        session=True,
+        token=False,
+        admin=admin,
+        login_view=login_view,
+        enable_redirect=enable_redirect,
+        auth_ext=auth_ext,
+    )
 
 
-def token_required(*args, admin=False, auth_ext=None):
+def token_required(*args, admin=False, login_view=None, enable_redirect=None,
+                   auth_ext=None):
     """Require Flask-HTTPAuth Bearer JWT authentication.
 
     Can be used as ``@token_required`` or ``@token_required(admin=True)``.
     """
-    if len(args) == 1 and callable(args[0]) and not admin:
-        return auth_required(session=False, token=True, auth_ext=auth_ext)(args[0])
-    return auth_required(session=False, token=True, admin=admin, auth_ext=auth_ext)
+    if (
+        len(args) == 1
+        and callable(args[0])
+        and not admin
+        and login_view is None
+        and enable_redirect is None
+    ):
+        return auth_required(
+            session=False,
+            token=True,
+            login_view=login_view,
+            enable_redirect=enable_redirect,
+            auth_ext=auth_ext,
+        )(args[0])
+    return auth_required(
+        session=False,
+        token=True,
+        admin=admin,
+        login_view=login_view,
+        enable_redirect=enable_redirect,
+        auth_ext=auth_ext,
+    )
 
 
-def admin_required(*args, session=None, token=None, auth_ext=None):
+def admin_required(*args, session=None, token=None, login_view=None,
+                   enable_redirect=None, auth_ext=None):
     """Require an authenticated admin user (via session, token, or both)."""
-    if len(args) == 1 and callable(args[0]) and session is None and token is None:
+    if (
+        len(args) == 1
+        and callable(args[0])
+        and session is None
+        and token is None
+        and login_view is None
+        and enable_redirect is None
+    ):
         return auth_required(admin=True, auth_ext=auth_ext)(args[0])
     return auth_required(
-        *args, session=session, token=token, admin=True, auth_ext=auth_ext
+        *args,
+        session=session,
+        token=token,
+        admin=True,
+        login_view=login_view,
+        enable_redirect=enable_redirect,
+        auth_ext=auth_ext,
     )
