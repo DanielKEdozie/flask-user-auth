@@ -1,6 +1,6 @@
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from flask import Blueprint, current_app, g, jsonify, redirect, request, url_for
+from flask import current_app, g, jsonify, redirect as flask_redirect, request, url_for
 from flask_httpauth import HTTPTokenAuth
 from flask_login import LoginManager
 import sqlalchemy as sa
@@ -19,47 +19,6 @@ from .routes import create_auth_blueprint
 from .tokens import JWTManager, TokenError
 
 
-def _normalize_enable_redirect(value) -> set[str]:
-    """Normalize ``enable_redirect`` into a set containing ``'session'`` and/or ``'token'``."""
-    if not value:
-        return set()
-    if value is True:
-        return {'session', 'token'}
-    if isinstance(value, str):
-        items = [value]
-    elif isinstance(value, (list, tuple, set)):
-        items = list(value)
-    else:
-        return set()
-
-    modes: set[str] = set()
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        cleaned = item.strip().lower()
-        if cleaned in ('both', 'all', '*'):
-            modes.update({'session', 'token'})
-        elif cleaned == 'session':
-            modes.add('session')
-        elif cleaned in ('token', 'jwt'):
-            modes.add('token')
-    return modes
-
-
-def _normalize_bp_login_views(bp_login_views: dict | None) -> dict[str, str]:
-    """Normalize ``{Blueprint | str: url_or_endpoint}`` keys to blueprint name strings."""
-    if not bp_login_views or not isinstance(bp_login_views, dict):
-        return {}
-    normalized: dict[str, str] = {}
-    for key, target in bp_login_views.items():
-        if not target:
-            continue
-        bp_name = key.name if isinstance(key, Blueprint) else str(key).strip()
-        if bp_name:
-            normalized[bp_name] = target
-    return normalized
-
-
 class Auth:
     """Flask authentication extension combining Flask-Login (session) and
     Flask-HTTPAuth + PyJWT (Bearer & cookie tokens) using SQLAlchemy 2.0+.
@@ -69,15 +28,7 @@ class Auth:
         from flask_user_auth import Auth
 
         auth = Auth()
-        auth.init_app(
-            app,
-            model=User,
-            use_session=True,
-            use_token=True,
-            login_view='/login',
-            bp_login_views={'admin': '/admin/login', 'store': '/login'},
-            enable_redirect=('session',),
-        )
+        auth.init_app(app, model=User, use_session=True, use_token=True)
     """
 
     DEFAULT_CONFIG = {
@@ -99,16 +50,12 @@ class Auth:
         'AUTH_PK_FIELD': 'id',
         'AUTH_REQUIRE_MECHANISM_CHOICE': False,
         'AUTH_CLI_GROUPS': ('user', 'auth'),
-        'AUTH_LOGIN_VIEW': None,
-        'AUTH_BP_LOGIN_VIEWS': None,
-        'AUTH_ENABLE_REDIRECT': ('session',),
         'AUTH_REDIRECT_NEXT_PARAM': 'next',
     }
 
     def __init__(self, app=None, model=None, use_session=True, use_token=True,
                  schema=None, serializer=None, url_prefix=None, db=None,
-                 cli_group=None, login_view=None, bp_login_views=None,
-                 enable_redirect=None):
+                 cli_group=None):
         self.app = app
         self.model = model
         self.use_session = bool(use_session)
@@ -118,13 +65,6 @@ class Auth:
         self.url_prefix = url_prefix
         self.db = db
         self.cli_group = cli_group
-        self.login_view = login_view
-        self.bp_login_views = _normalize_bp_login_views(bp_login_views)
-        self.enable_redirect = (
-            _normalize_enable_redirect(enable_redirect)
-            if enable_redirect is not None
-            else None
-        )
 
         self.login_manager = None
         self.http_auth = None
@@ -147,15 +87,11 @@ class Auth:
                 url_prefix=url_prefix,
                 db=db,
                 cli_group=cli_group,
-                login_view=login_view,
-                bp_login_views=bp_login_views,
-                enable_redirect=enable_redirect,
             )
 
     def init_app(self, app, model=None, use_session=None, use_token=None,
                  schema=None, serializer=None, url_prefix=None, db=None,
-                 register_blueprint=True, register_cli=True, cli_group=None,
-                 login_view=None, bp_login_views=None, enable_redirect=None):
+                 register_blueprint=True, register_cli=True, cli_group=None):
         """Initialize the extension with a Flask application."""
         if model is not None:
             self.model = model
@@ -173,12 +109,6 @@ class Auth:
             self.db = db
         if cli_group is not None:
             self.cli_group = cli_group
-        if login_view is not None:
-            self.login_view = login_view
-        if bp_login_views is not None:
-            self.bp_login_views = _normalize_bp_login_views(bp_login_views)
-        if enable_redirect is not None:
-            self.enable_redirect = _normalize_enable_redirect(enable_redirect)
 
         if self.model is None:
             raise ValueError(
@@ -187,17 +117,6 @@ class Auth:
 
         for key, default_val in self.DEFAULT_CONFIG.items():
             app.config.setdefault(key, default_val)
-
-        if self.login_view is None and app.config.get('AUTH_LOGIN_VIEW'):
-            self.login_view = app.config['AUTH_LOGIN_VIEW']
-        if not self.bp_login_views and app.config.get('AUTH_BP_LOGIN_VIEWS'):
-            self.bp_login_views = _normalize_bp_login_views(
-                app.config['AUTH_BP_LOGIN_VIEWS']
-            )
-        if self.enable_redirect is None:
-            self.enable_redirect = _normalize_enable_redirect(
-                app.config.get('AUTH_ENABLE_REDIRECT', ('session',))
-            )
 
         if not app.config.get('JWT_SECRET_KEY') and app.config.get('SECRET_KEY'):
             app.config['JWT_SECRET_KEY'] = app.config['SECRET_KEY']
@@ -256,46 +175,21 @@ class Auth:
 
     # --- Redirect & Unauthorized Handling ------------------------------
 
-    def get_enabled_redirect_modes(self, override=None) -> set[str]:
-        """Return active redirect modes (subset of ``{'session', 'token'}``)."""
-        if override is not None:
-            return _normalize_enable_redirect(override)
-        if self.enable_redirect is not None:
-            return set(self.enable_redirect)
-        return _normalize_enable_redirect(
-            current_app.config.get('AUTH_ENABLE_REDIRECT', ('session',))
-        )
+    def build_redirect_url(self, target, include_next: bool = True) -> str:
+        """Resolve a URL path, Flask endpoint name, or callable into a redirect URL.
 
-    def resolve_login_target(self, login_view=None, bp_name=None) -> str | None:
-        """Resolve the login URL or endpoint for the active blueprint or app.
-
-        Priority:
-            1. Explicit ``login_view`` argument (e.g. per-decorator override)
-            2. ``bp_login_views[request.blueprint]``
-            3. ``self.login_view`` / ``app.config['AUTH_LOGIN_VIEW']``
-            4. ``None`` (use JSON response)
+        Automatically appends ``?next=<current_path>`` unless ``include_next=False``.
         """
-        if login_view:
-            return login_view
+        resolved = target() if callable(target) else target
+        resolved = str(resolved).strip()
 
-        active_bp = bp_name if bp_name is not None else getattr(request, 'blueprint', None)
-        bp_map = self.bp_login_views or _normalize_bp_login_views(
-            current_app.config.get('AUTH_BP_LOGIN_VIEWS')
-        )
-        if active_bp and active_bp in bp_map:
-            return bp_map[active_bp]
-
-        return self.login_view or current_app.config.get('AUTH_LOGIN_VIEW')
-
-    def build_login_redirect_url(self, target: str, include_next: bool = True) -> str:
-        """Convert a URL path or Flask endpoint name into a redirect URL (with ``?next=...``)."""
-        if target.startswith(('/', 'http://', 'https://')):
-            base_url = target
+        if resolved.startswith(('/', 'http://', 'https://')):
+            base_url = resolved
         else:
             try:
-                base_url = url_for(target)
+                base_url = url_for(resolved)
             except BuildError:
-                base_url = target
+                base_url = resolved
 
         next_param = current_app.config.get('AUTH_REDIRECT_NEXT_PARAM', 'next')
         if not include_next or not next_param:
@@ -311,53 +205,22 @@ class Auth:
         new_query = urlencode(query)
         return urlunparse(parsed._replace(query=new_query))
 
-    def should_redirect_unauthorized(
-        self,
-        *,
-        allow_session: bool = False,
-        allow_token: bool = False,
-        enable_redirect=None,
-    ) -> bool:
-        """Check whether an unauthorized request should redirect based on ``enable_redirect``."""
-        modes = self.get_enabled_redirect_modes(override=enable_redirect)
-        if not modes:
-            return False
-        if allow_session and 'session' in modes:
-            return True
-        if allow_token and 'token' in modes:
-            return True
-        return False
-
     def unauthorized_response(
         self,
         message: str = 'Authentication required',
         status_code: int = 401,
         *,
-        allow_session: bool = False,
-        allow_token: bool = False,
-        login_view: str | None = None,
-        enable_redirect=None,
+        redirect=None,
     ):
-        """Return a redirect response if configured & enabled for the auth mode,
-        otherwise return a JSON error response ``(jsonify({'message': message}), status_code)``.
-        """
-        target = self.resolve_login_target(login_view=login_view)
-        if target and self.should_redirect_unauthorized(
-            allow_session=allow_session,
-            allow_token=allow_token,
-            enable_redirect=enable_redirect,
-        ):
-            return redirect(self.build_login_redirect_url(target))
+        """Return a redirect response if ``redirect`` is provided, otherwise a JSON response."""
+        if redirect:
+            return flask_redirect(self.build_redirect_url(redirect))
         return jsonify({'message': message}), status_code
 
     def _setup_session_auth(self, app):
         """Configure Flask-Login ``LoginManager`` on ``app``."""
         self.login_manager = LoginManager()
         self.login_manager.init_app(app)
-        if self.login_view:
-            self.login_manager.login_view = self.login_view
-        if self.bp_login_views:
-            self.login_manager.blueprint_login_views.update(self.bp_login_views)
 
         @self.login_manager.user_loader
         def _load_user_from_session(user_id):
@@ -365,12 +228,7 @@ class Auth:
 
         @self.login_manager.unauthorized_handler
         def _unauthorized():
-            return self.unauthorized_response(
-                'Session authentication required',
-                401,
-                allow_session=True,
-                allow_token=False,
-            )
+            return jsonify({'message': 'Session authentication required'}), 401
 
     def _setup_token_auth(self, app):
         """Configure Flask-HTTPAuth ``HTTPTokenAuth`` on ``app``."""
@@ -388,12 +246,7 @@ class Auth:
             msg = getattr(
                 g, '_auth_token_error', 'Invalid or missing authentication token'
             )
-            return self.unauthorized_response(
-                msg,
-                status or 401,
-                allow_session=False,
-                allow_token=True,
-            )
+            return jsonify({'message': msg}), status or 401
 
     def _verify_token_with_http_auth(self, raw_token):
         """Verify ``raw_token`` as an access JWT and populate request context."""
@@ -627,44 +480,37 @@ class Auth:
         return current_user
 
     def auth_required(self, *args, session=None, token=None, admin=False,
-                      login_view=None, enable_redirect=None):
+                      redirect=None):
         return _auth_required(
             *args,
             session=session,
             token=token,
             admin=admin,
-            login_view=login_view,
-            enable_redirect=enable_redirect,
+            redirect=redirect,
             auth_ext=self,
         )
 
-    def login_required(self, *args, admin=False, login_view=None,
-                       enable_redirect=None):
+    def login_required(self, *args, admin=False, redirect=None):
         return _login_required(
             *args,
             admin=admin,
-            login_view=login_view,
-            enable_redirect=enable_redirect,
+            redirect=redirect,
             auth_ext=self,
         )
 
-    def token_required(self, *args, admin=False, login_view=None,
-                       enable_redirect=None):
+    def token_required(self, *args, admin=False, redirect=None):
         return _token_required(
             *args,
             admin=admin,
-            login_view=login_view,
-            enable_redirect=enable_redirect,
+            redirect=redirect,
             auth_ext=self,
         )
 
-    def admin_required(self, *args, session=None, token=None,
-                       login_view=None, enable_redirect=None):
+    def admin_required(self, *args, session=None, token=None, redirect=None):
         return _admin_required(
             *args,
             session=session,
             token=token,
-            login_view=login_view,
-            enable_redirect=enable_redirect,
+            redirect=redirect,
             auth_ext=self,
         )
